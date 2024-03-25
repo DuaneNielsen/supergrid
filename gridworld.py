@@ -11,10 +11,13 @@ from torchrl.envs import (
     TransformedEnv,
 )
 from torchrl.envs.utils import check_env_specs, step_mdp
-from torchrl.envs.transforms.transforms import _apply_to_composite
+from torchrl.envs.transforms.transforms import _apply_to_composite, ObservationTransform, Resize
 from torch.nn.functional import interpolate
 from torchvision.utils import make_grid
 from math import prod
+from tensordict.utils import expand_as_right, expand_right, NestedKey
+from typing import Any, Dict, List, Optional, OrderedDict, Sequence, Tuple, Union
+from enum import IntEnum
 
 """
 A minimal stateless vectorized gridworld in pytorch rl
@@ -34,12 +37,20 @@ example of configuring and performing a rollout at bottom
 Maybe I will write an even simpler stateless non-vectorized version of this gridworld
 """
 
+
+class Actions(IntEnum):
+    N = 0,
+    E = 1,
+    S = 2,
+    W = 3
+
+
 # N/S is reversed as y-axis in images is reversed
 action_vec = [
-    tensor([0, -1]),  # N
-    tensor([1, 0]),  # E
-    tensor([0, 1]),  # S
-    tensor([-1, 0])  # W
+    tensor([-1, 0]),  # N
+    tensor([0, 1]),  # E
+    tensor([1, 0]),  # S
+    tensor([0, -1])  # W
 ]
 action_vec = torch.stack(action_vec)
 
@@ -49,37 +60,57 @@ green = tensor([0, 255, 0], dtype=torch.uint8)
 pink = tensor([255, 0, 255], dtype=torch.uint8)
 violet = tensor([226, 43, 138], dtype=torch.uint8)
 white = tensor([255, 255, 255], dtype=torch.uint8)
+gray = tensor([128, 128, 128], dtype=torch.uint8)
+light_gray = tensor([211, 211, 211], dtype=torch.uint8)
+
+
+def pos_to_grid(pos, H, W, device='cpu', dtype=torch.float32):
+    """
+    Converts positions to grid where 1 indicates a position
+    :param pos: N, 2 tensor of grid positions (x = H, y = W) or 2 tensor
+    :param H: height
+    :param W: width
+    :param: device: device
+    :param: dtype: type of tensor
+    :return: N, H, W tensor or single H, W tensor
+    """
+
+    if len(pos.shape) == 2:
+        N = pos.size(0)
+        batch_range = torch.arange(N, device=device)
+        grid = torch.zeros((N, H, W), dtype=dtype, device=device)
+        grid[batch_range, pos[:, 0], pos[:, 1]] = 1.
+    else:
+        grid = torch.zeros((H, W), dtype=dtype, device=device)
+        grid[pos[0], pos[1]] = 1.
+    return grid
 
 
 def _step(state):
 
     device = state.device
-    # make our life easier by creating a view with a single leading dim
-    state_flat = state.view(prod(state.shape))
-    batch_range = torch.arange(state_flat.size(0), device=device)
+    N, H, W = state['wall_tiles'].shape
+    batch_range = torch.arange(N, device=device)
+    dtype = state['wall_tiles'].dtype
 
     # move player position checking for collisions
     direction = action_vec.to(device)
-    next_player_pos = state_flat['player_pos'] + direction[state_flat['action'][:, 0]]
-    next_player_grid = torch.zeros_like(state_flat['wall_tiles'], dtype=torch.bool, device=device)
-    next_player_grid[batch_range, next_player_pos[:, 0], next_player_pos[:, 1]] = True
-    collide_wall = torch.logical_and(next_player_grid, state_flat['wall_tiles'] == 1).any(-1).any(-1)
-    player_pos = torch.where(collide_wall[..., None], state_flat['player_pos'], next_player_pos)
-    player_pos_mask = torch.zeros_like(state_flat['wall_tiles'], dtype=torch.bool, device=device)
-    player_pos_mask[batch_range, player_pos[:, 0], player_pos[:, 1]] = True
-
-    player_pos = player_pos.reshape(state['player_pos'].shape)
-    player_pos_mask = player_pos_mask.reshape(state['wall_tiles'].shape)
+    next_player_pos = state['player_pos'] + direction[state['action'][:, 0]]
+    next_player_grid = pos_to_grid(next_player_pos, H, W, device=device, dtype=torch.bool)
+    collide_wall = torch.logical_and(next_player_grid, state['wall_tiles'] == 1).any(-1).any(-1)
+    player_pos = torch.where(collide_wall[..., None], state['player_pos'], next_player_pos)
 
     # pickup any rewards
-    reward = state['reward_tiles'][player_pos_mask]
-    state['reward_tiles'][player_pos_mask] = 0.
+    reward = state['reward_tiles'][batch_range, player_pos[:, 0], player_pos[:, 1]]
+    state['reward_tiles'][batch_range, player_pos[:, 0], player_pos[:, 1]] = 0.
 
     # set done flag if hit done tile
-    done = state['done_tiles'][player_pos_mask]
+    done = state['done_tiles'][batch_range, player_pos[:, 0], player_pos[:, 1]]
+    player_tiles = pos_to_grid(player_pos, H, W, device=device, dtype=dtype)
 
     out = {
         'player_pos': player_pos,
+        'player_tiles': player_tiles,
         'wall_tiles': state['wall_tiles'],
         'reward_tiles': state['reward_tiles'],
         'done_tiles': state['done_tiles'],
@@ -95,11 +126,10 @@ def _reset(self, tensordict=None):
         tensordict = self.gen_params(batch_size).to(self.device)
     if '_reset' in tensordict.keys():
         reset_state = self.gen_params(batch_size).to(self.device)
-        tensordict = tensordict.clone()
+        reset_mask = tensordict['_reset'].squeeze(-1)
+        # tensordict = tensordict.clone()
         for key in reset_state.keys():
-            tensordict[key][tensordict['_reset'].squeeze(-1)] = reset_state[key][tensordict['_reset'].squeeze(-1)]
-        # tensordict['done'][tensordict['_reset'].squeeze(-1)] = False
-        # tensordict['reward'][tensordict['_reset'].squeeze(-1)] = 0.
+            tensordict[key][reset_mask] = reset_state[key][reset_mask]
     return tensordict
 
 
@@ -128,10 +158,13 @@ def gen_params(batch_size=None):
         [0, 0, 0, 0, 0],
     ], dtype=torch.bool)
 
+    H, W = walls.shape
     player_pos = tensor([2, 2], dtype=torch.int64)
+    player_tiles = pos_to_grid(player_pos, H, W, dtype=walls.dtype)
 
     state = {
             "player_pos": player_pos,
+            "player_tiles": player_tiles,
             "wall_tiles": walls,
             "reward_tiles": rewards,
             "done_tiles": dones
@@ -147,6 +180,12 @@ def gen_params(batch_size=None):
 def _make_spec(self, td_params):
     batch_size = td_params.shape
     self.observation_spec = CompositeSpec(
+        player_tiles=BoundedTensorSpec(
+            minimum=0,
+            maximum=1,
+            shape=torch.Size((*batch_size, 5, 5)),
+            dtype=torch.uint8,
+        ),
         wall_tiles=BoundedTensorSpec(
             minimum=0,
             maximum=1,
@@ -191,7 +230,6 @@ class Gridworld(EnvBase):
             td_params = self.gen_params(batch_size)
         super().__init__(device=device, batch_size=batch_size)
         self._make_spec(td_params)
-        # self.shape = batch_size
 
     gen_params = staticmethod(gen_params)
     _make_spec = _make_spec
@@ -200,7 +238,18 @@ class Gridworld(EnvBase):
     _set_seed = _set_seed
 
 
-class RGBFullObsTransform(Transform):
+class RGBFullObsTransform(ObservationTransform):
+
+    def __init__(
+            self,
+            w: int,
+            h: int | None = None,
+            in_keys: Sequence[NestedKey] | None = None,
+            out_keys: Sequence[NestedKey] | None = None,
+    ):
+        super().__init__(in_keys, out_keys)
+        self.w = w
+        self.h = h if h is not None else w
 
     def forward(self, tensordict):
         return self._call(tensordict)
@@ -221,12 +270,12 @@ class RGBFullObsTransform(Transform):
         grid = TensorDict({'image': torch.zeros(*walls.shape, 3, dtype=torch.uint8)}, batch_size=td_flat.batch_size)
         x, y = player_pos[:, 0], player_pos[:, 1]
 
-        grid['image'][walls == 1] = white
+        grid['image'][walls == 1] = light_gray
         grid['image'][rewards > 0] = green
         grid['image'][rewards < 0] = red
         grid['image'][batch_range, x, y, :] = yellow
         grid['image'] = grid['image'].permute(0, 3, 1, 2)
-        td['observation'] = interpolate(grid['image'], size=[64, 64]).squeeze(0)
+        td['observation'] = grid['image'].squeeze(0)
         return td
 
     @_apply_to_composite
@@ -234,7 +283,7 @@ class RGBFullObsTransform(Transform):
         return BoundedTensorSpec(
             minimum=0,
             maximum=255,
-            shape=torch.Size((*self.parent.batch_size, 3, 64, 64)),
+            shape=torch.Size((*self.parent.batch_size, 3, self.w, self.h)),
             dtype=torch.uint8,
             device=observation_spec.device
         )
@@ -250,13 +299,17 @@ if __name__ == '__main__':
 
     env = TransformedEnv(
         env,
-        RGBFullObsTransform(in_keys=['player_pos', 'wall_tiles'], out_keys=['observation'])
+        RGBFullObsTransform(5, in_keys=['wall_tiles'], out_keys=['observation']),
     )
 
     check_env_specs(env)
 
+    # env.append_transform(Resize(64, 64, in_keys=['observation'], out_keys=['observation'], interpolation='nearest'))
+    # check_env_specs(env)
+
     data = env.rollout(max_steps=100, policy=env.rand_action, break_when_any_done=False)
     data = data.cpu()
+    print(data)
 
     """
     The data dict layout is transitions
