@@ -92,10 +92,10 @@ def _step(state):
     N, H, W = state['wall_tiles'].shape
     batch_range = torch.arange(N, device=device)
     dtype = state['wall_tiles'].dtype
-
+    action = state['action'].squeeze(-1)
     # move player position checking for collisions
     direction = action_vec.to(device)
-    next_player_pos = state['player_pos'] + direction[state['action'][:, 0]]
+    next_player_pos = state['player_pos'] + direction[action]
     next_player_grid = pos_to_grid(next_player_pos, H, W, device=device, dtype=torch.bool)
     collide_wall = torch.logical_and(next_player_grid, state['wall_tiles'] == 1).any(-1).any(-1)
     player_pos = torch.where(collide_wall[..., None], state['player_pos'], next_player_pos)
@@ -127,7 +127,6 @@ def _reset(self, tensordict=None):
     if '_reset' in tensordict.keys():
         reset_state = self.gen_params(batch_size).to(self.device)
         reset_mask = tensordict['_reset'].squeeze(-1)
-        # tensordict = tensordict.clone()
         for key in reset_state.keys():
             tensordict[key][reset_mask] = reset_state[key][reset_mask]
     return tensordict
@@ -140,7 +139,7 @@ def gen_params(batch_size=None):
         [1, 0, 0, 0, 1],
         [1, 0, 0, 0, 1],
         [1, 1, 1, 1, 1],
-    ], dtype=torch.uint8)
+    ], dtype=torch.float32)
 
     rewards = tensor([
         [0, 0, 0, 0, 0],
@@ -184,13 +183,13 @@ def _make_spec(self, td_params):
             minimum=0,
             maximum=1,
             shape=torch.Size((*batch_size, 5, 5)),
-            dtype=torch.uint8,
+            dtype=torch.float32,
         ),
         wall_tiles=BoundedTensorSpec(
             minimum=0,
             maximum=1,
             shape=torch.Size((*batch_size, 5, 5)),
-            dtype=torch.uint8,
+            dtype=torch.float32,
         ),
         reward_tiles=UnboundedContinuousTensorSpec(
             shape=torch.Size((*batch_size, 5, 5)),
@@ -260,20 +259,15 @@ class RGBFullObsTransform(ObservationTransform):
 
     def _call(self, td):
 
-        td_flat = td.view(prod(td.batch_size))
-        batch_range = torch.arange(td_flat.size(0), device=td.device)
+        player_tiles = td['player_tiles']
+        walls = td['wall_tiles']
+        rewards = td['reward_tiles']
 
-        player_pos = td_flat['player_pos']
-        walls = td_flat['wall_tiles']
-        rewards = td_flat['reward_tiles']
-
-        grid = TensorDict({'image': torch.zeros(*walls.shape, 3, dtype=torch.uint8)}, batch_size=td_flat.batch_size)
-        x, y = player_pos[:, 0], player_pos[:, 1]
-
+        grid = TensorDict({'image': torch.zeros(*walls.shape, 3, dtype=torch.uint8)}, batch_size=td.batch_size)
         grid['image'][walls == 1] = light_gray
         grid['image'][rewards > 0] = green
         grid['image'][rewards < 0] = red
-        grid['image'][batch_range, x, y, :] = yellow
+        grid['image'][player_tiles == 1] = yellow
         grid['image'] = grid['image'].permute(0, 3, 1, 2)
         td['observation'] = grid['image'].squeeze(0)
         return td
