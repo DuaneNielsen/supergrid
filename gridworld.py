@@ -9,6 +9,7 @@ from torchrl.envs import (
     EnvBase,
     Transform,
     TransformedEnv,
+    RewardSum,
 )
 from torchrl.envs.utils import check_env_specs, step_mdp
 from torchrl.envs.transforms.transforms import _apply_to_composite, ObservationTransform, Resize
@@ -93,12 +94,14 @@ def _step(state):
     batch_range = torch.arange(N, device=device)
     dtype = state['wall_tiles'].dtype
     action = state['action'].squeeze(-1)
+
     # move player position checking for collisions
     direction = action_vec.to(device)
     next_player_pos = state['player_pos'] + direction[action]
     next_player_grid = pos_to_grid(next_player_pos, H, W, device=device, dtype=torch.bool)
     collide_wall = torch.logical_and(next_player_grid, state['wall_tiles'] == 1).any(-1).any(-1)
     player_pos = torch.where(collide_wall[..., None], state['player_pos'], next_player_pos)
+    player_tiles = pos_to_grid(player_pos, H, W, device=device, dtype=dtype)
 
     # pickup any rewards
     reward = state['reward_tiles'][batch_range, player_pos[:, 0], player_pos[:, 1]]
@@ -106,7 +109,6 @@ def _step(state):
 
     # set done flag if hit done tile
     done = state['done_tiles'][batch_range, player_pos[:, 0], player_pos[:, 1]]
-    player_tiles = pos_to_grid(player_pos, H, W, device=device, dtype=dtype)
 
     out = {
         'player_pos': player_pos,
@@ -114,8 +116,8 @@ def _step(state):
         'wall_tiles': state['wall_tiles'],
         'reward_tiles': state['reward_tiles'],
         'done_tiles': state['done_tiles'],
-        'reward': reward,
-        'done': done
+        'reward': reward.unsqueeze(-1),
+        'done': done.unsqueeze(-1)
     }
     return TensorDict(out, state.shape)
 
@@ -143,9 +145,9 @@ def gen_params(batch_size=None):
 
     rewards = tensor([
         [0, 0, 0, 0, 0],
-        [0, 1, 1, -1, 0],
+        [0, 1, 1, 0, 0],
         [0, 1, 0, 1, 0],
-        [0, -1, 1, 1, 0],
+        [0, 0, 1, 1, 0],
         [0, 0, 0, 0, 0],
     ], dtype=torch.float32)
 
@@ -287,8 +289,11 @@ if __name__ == '__main__':
 
     from matplotlib import pyplot as plt
     import matplotlib.animation as animation
+    from torchrl.collectors import SyncDataCollector
 
-    env = Gridworld(batch_size=torch.Size([64]), device='cuda')
+    env_batch_size = 64
+
+    env = Gridworld(batch_size=torch.Size([env_batch_size]), device='cuda')
     check_env_specs(env)
 
     env = TransformedEnv(
@@ -298,52 +303,71 @@ if __name__ == '__main__':
 
     check_env_specs(env)
 
+    env.append_transform(RewardSum())
+
     # env.append_transform(Resize(64, 64, in_keys=['observation'], out_keys=['observation'], interpolation='nearest'))
     # check_env_specs(env)
 
-    data = env.rollout(max_steps=100, policy=env.rand_action, break_when_any_done=False)
-    data = data.cpu()
-    print(data)
+    collector = SyncDataCollector(
+        env,
+        env.rand_action,
+        frames_per_batch=env_batch_size * 1,
+        total_frames=env_batch_size * 100,
+        split_trajs=False,
+        device="cuda",
+    )
 
-    """
-    The data dict layout is transitions
-    
-    {(S, A), next: {R_next, S_next, A_next}}
-    
-    [
-      { state_t0, reward_t0, done_t0, action_t0 next: { state_t2, reward_t2:1.0, done_t2:False } },
-      { state_t1, reward_t1, done_t1, action_t1 next: { state_t3, reward_t2:-1.0, done_t3:True } }  
-      { state_t0, reward_t0, done_t0, action_t0 next: { state_t3, reward_t2:1.0, done_t3:False } }
-    ]
+    buffer = []
 
-    But which R to use, R or next: R?
+    for i, data in enumerate(collector):
+
+        # data = env.rollout(max_steps=100, policy=env.rand_action, break_when_any_done=False)
+        buffer += [data.cpu()]
+        print([data['next', 'reward']])
+        print([data['episode_reward'].max().item()])
+
+
+        """
+        The data dict layout is transitions
+        
+        {(S, A), next: {R_next, S_next, A_next}}
+        
+        [
+          { state_t0, reward_t0, done_t0, action_t0 next: { state_t2, reward_t2:1.0, done_t2:False } },
+          { state_t1, reward_t1, done_t1, action_t1 next: { state_t3, reward_t2:-1.0, done_t3:True } }  
+          { state_t0, reward_t0, done_t0, action_t0 next: { state_t3, reward_t2:1.0, done_t3:False } }
+        ]
     
-    recall: Q(S, A) = R + Q(S_next, A_next)
-    
-    Observe that reward_t0 is always zero, reward is a consequence for taking an action in a state, therefore...
-    
-    reward = data['next']['reward'][timestep]
-    
-    Which done to use?
-    
-    Recall that the value of a state is the expectation of future reward.
-    Thus the terminal state has no value, therefore...
-    
-    Q(S, A) = R_next + Q(S_next, A_next) * done_next
-    
-    done =  data['next']['done'][timestep]
-    """
+        But which R to use, R or next: R?
+        
+        recall: Q(S, A) = R + Q(S_next, A_next)
+        
+        Observe that reward_t0 is always zero, reward is a consequence for taking an action in a state, therefore...
+        
+        reward = data['next']['reward'][timestep]
+        
+        Which done to use?
+        
+        Recall that the value of a state is the expectation of future reward.
+        Thus the terminal state has no value, therefore...
+        
+        Q(S, A) = R_next + Q(S_next, A_next) * done_next
+        
+        done =  data['next']['done'][timestep]
+        """
+
+    observation = torch.concatenate([b['observation'] for b in buffer], dim=1)
 
     fig, ax = plt.subplots(1)
-    img_plt = ax.imshow(make_grid(data[:, 0]['observation']).permute(1, 2, 0))
+    img_plt = ax.imshow(make_grid(observation[:, 0]).permute(1, 2, 0))
 
     def animate(i):
         global text_plt
-        x = make_grid(data[:, i]['observation']).permute(1, 2, 0)
+        x = make_grid(observation[:, i]).permute(1, 2, 0)
         img_plt.set_data(x)
         return
 
-    myAnimation = animation.FuncAnimation(fig, animate, frames=20, interval=1, blit=False, repeat=False)
+    myAnimation = animation.FuncAnimation(fig, animate, frames=90, interval=500, blit=False, repeat=False)
 
     # FFwriter = animation.FFMpegWriter(fps=1)
     # myAnimation.save('animation.mp4', writer=FFwriter)
