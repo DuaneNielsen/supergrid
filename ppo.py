@@ -30,9 +30,9 @@ from torchvision.utils import make_grid
 
 wandb.init(project='grid_ppo_test')
 
-env_batch_size = 128
+env_batch_size = 64
 frames_per_batch = env_batch_size * 2
-total_frames = env_batch_size * 100000
+total_frames = env_batch_size * 10
 
 pbar = tqdm.tqdm(range(total_frames // env_batch_size))
 logs = defaultdict(list)
@@ -75,6 +75,8 @@ check_env_specs(env)
 
 env.append_transform(StepCounter())
 env.append_transform(RewardSum(reset_keys=['_reset']))
+env.append_transform(RGBFullObsTransform(5, in_keys=['wall_tiles'], out_keys=['image']))
+check_env_specs(env)
 
 in_features = env.observation_spec['flat_obs'].shape[-1]
 actions_n = env.action_spec.n
@@ -167,27 +169,6 @@ pbar = tqdm.tqdm(total=total_frames)
 eval_str = ""
 
 
-def show_data(data):
-    fig, ax = plt.subplots(1)
-    img_plt = ax.imshow(make_grid(data[:, 0]['observation']).permute(1, 2, 0))
-
-    def animate(i):
-        global text_plt
-        x = make_grid(data[:, i]['observation']).permute(1, 2, 0)
-        img_plt.set_data(x)
-        return
-
-    myAnimation = animation.FuncAnimation(fig, animate, frames=90, interval=500, blit=False, repeat=False)
-
-    # FFwriter = animation.FFMpegWriter(fps=1)
-    # myAnimation.save('animation.mp4', writer=FFwriter)
-    plt.show()
-
-
-# We iterate over the collector until it reaches the total number of frames it was
-# designed to collect:
-
-
 for i, tensordict_data in enumerate(collector):
 
     advantage_module(tensordict_data)
@@ -239,7 +220,7 @@ for i, tensordict_data in enumerate(collector):
     lr_str = f"lr policy: {logs['lr'][-1]: 4.4f}"
 
     if i % 1024 == 0:
-        with set_exploration_type(ExplorationType.MODE), torch.no_grad():
+        with set_exploration_type(ExplorationType.RANDOM), torch.no_grad():
             eval_rollout = env.rollout(1000, policy_module)
             advantage_module(eval_rollout)
             epi_stats = retrieve_episode_stats(eval_rollout, prefix='eval')
@@ -260,14 +241,23 @@ for i, tensordict_data in enumerate(collector):
 
     scheduler.step()
 
-#
-# for _ in pbar:
-#     init_td = env.reset(env.gen_params(batch_size=[batch_size]))
-#     rollout = env.rollout(100, policy, auto_reset=True)
-#     traj_return = rollout["next", "reward"].mean()
-#     pbar.set_description(
-#         f"reward: {traj_return: 4.4f}, "
-#         f"last reward: {rollout[..., -1]['next', 'reward'].mean(): 4.4f}"
-#     )
-#     logs["return"].append(traj_return.item())
-#     logs["last_reward"].append(rollout[..., -1]["next", "reward"].mean().item())
+with set_exploration_type(ExplorationType.RANDOM), torch.no_grad():
+    eval_rollout = env.rollout(1000, policy_module, break_when_any_done=False)
+    eval_rollout = eval_rollout.cpu()
+    observation = eval_rollout['image']
+    walls = eval_rollout['wall_tiles']
+
+    fig, ax = plt.subplots(1)
+    img_plt = ax.imshow(make_grid(observation[:, 0]).permute(1, 2, 0))
+
+    def animate(i):
+        global text_plt
+        x = make_grid(observation[:, i]).permute(1, 2, 0)
+        img_plt.set_data(x)
+        return
+
+    myAnimation = animation.FuncAnimation(fig, animate, frames=90, interval=500, blit=False, repeat=False)
+
+    # FFwriter = animation.FFMpegWriter(fps=1)
+    # myAnimation.save('animation.mp4', writer=FFwriter)
+    plt.show()

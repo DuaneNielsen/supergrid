@@ -267,14 +267,14 @@ class RGBFullObsTransform(ObservationTransform):
         rewards = td['reward_tiles']
         terminal = td['terminal_tiles']
 
-        grid = TensorDict({'image': torch.zeros(*walls.shape, 3, dtype=torch.uint8)}, batch_size=td.batch_size)
-        grid['image'][walls == 1] = light_gray
-        grid['image'][rewards > 0] = green
-        grid['image'][rewards < 0] = red
-        grid['image'][terminal == 1] = blue
-        grid['image'][player_tiles == 1] = yellow
-        grid['image'] = grid['image'].permute(0, 3, 1, 2)
-        td['observation'] = grid['image'].squeeze(0)
+        shape = *walls.shape, 3
+        td['image'] = torch.zeros(shape, dtype=torch.uint8, device=td.device)
+        td['image'][walls == 1] = light_gray.to(td.device)
+        td['image'][rewards > 0] = green.to(td.device)
+        td['image'][rewards < 0] = red.to(td.device)
+        td['image'][terminal == 1] = blue.to(td.device)
+        td['image'][player_tiles == 1] = yellow.to(td.device)
+        td['image'] = td['image'].permute(0, 3, 1, 2).squeeze(0)
         return td
 
     @_apply_to_composite
@@ -301,7 +301,7 @@ if __name__ == '__main__':
 
     env = TransformedEnv(
         env,
-        RGBFullObsTransform(5, in_keys=['wall_tiles'], out_keys=['observation']),
+        RGBFullObsTransform(5, in_keys=['wall_tiles', 'player_tiles', 'reward_tiles', 'terminal_tiles'], out_keys=['image']),
     )
 
     check_env_specs(env)
@@ -326,9 +326,6 @@ if __name__ == '__main__':
 
         # data = env.rollout(max_steps=100, policy=env.rand_action, break_when_any_terminal=False)
         buffer += [data.cpu()]
-        print([data['next', 'reward']])
-        print([data['episode_reward'].max().item()])
-
 
         """
         The data dict layout is transitions
@@ -359,13 +356,12 @@ if __name__ == '__main__':
         terminal =  data['next']['terminal'][timestep]
         """
 
-    observation = torch.concatenate([b['observation'] for b in buffer], dim=1)
+    observation = torch.concatenate([b['image'] for b in buffer], dim=1)
 
     fig, ax = plt.subplots(1)
     img_plt = ax.imshow(make_grid(observation[:, 0]).permute(1, 2, 0))
 
     def animate(i):
-        global text_plt
         x = make_grid(observation[:, i]).permute(1, 2, 0)
         img_plt.set_data(x)
         return
