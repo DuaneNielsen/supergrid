@@ -28,7 +28,7 @@ Features
 
 walls
 1 time pickup rewards or penalties
-done tiles
+terminated tiles
 outputs a fully observable RGB image 
 
 look at the gen_params function to setup the world
@@ -63,6 +63,7 @@ violet = tensor([226, 43, 138], dtype=torch.uint8)
 white = tensor([255, 255, 255], dtype=torch.uint8)
 gray = tensor([128, 128, 128], dtype=torch.uint8)
 light_gray = tensor([211, 211, 211], dtype=torch.uint8)
+blue = tensor([0, 0, 255], dtype=torch.uint8)
 
 
 def pos_to_grid(pos, H, W, device='cpu', dtype=torch.float32):
@@ -107,17 +108,17 @@ def _step(state):
     reward = state['reward_tiles'][batch_range, player_pos[:, 0], player_pos[:, 1]]
     state['reward_tiles'][batch_range, player_pos[:, 0], player_pos[:, 1]] = 0.
 
-    # set done flag if hit done tile
-    done = state['done_tiles'][batch_range, player_pos[:, 0], player_pos[:, 1]]
+    # set terminated flag if hit terminal tile
+    terminated = state['terminal_tiles'][batch_range, player_pos[:, 0], player_pos[:, 1]]
 
     out = {
         'player_pos': player_pos,
         'player_tiles': player_tiles,
         'wall_tiles': state['wall_tiles'],
         'reward_tiles': state['reward_tiles'],
-        'done_tiles': state['done_tiles'],
+        'terminal_tiles': state['terminal_tiles'],
         'reward': reward.unsqueeze(-1),
-        'done': done.unsqueeze(-1)
+        'terminated': terminated.unsqueeze(-1)
     }
     return TensorDict(out, state.shape)
 
@@ -147,11 +148,11 @@ def gen_params(batch_size=None):
         [0, 0, 0, 0, 0],
         [0, 1, 1, 0, 0],
         [0, 1, 0, 1, 0],
-        [0, 0, 1, 1, 0],
+        [0, -1, 1, 1, 0],
         [0, 0, 0, 0, 0],
     ], dtype=torch.float32)
 
-    dones = tensor([
+    terminal_states = tensor([
         [0, 0, 0, 0, 0],
         [0, 0, 0, 1, 0],
         [0, 0, 0, 0, 0],
@@ -168,7 +169,7 @@ def gen_params(batch_size=None):
             "player_tiles": player_tiles,
             "wall_tiles": walls,
             "reward_tiles": rewards,
-            "done_tiles": dones
+            "terminal_tiles": terminal_states
     }
 
     td = TensorDict(state, batch_size=[])
@@ -197,7 +198,7 @@ def _make_spec(self, td_params):
             shape=torch.Size((*batch_size, 5, 5)),
             dtype=torch.float32,
         ),
-        done_tiles=BoundedTensorSpec(
+        terminal_tiles=BoundedTensorSpec(
             minimum=0,
             maximum=1,
             shape=torch.Size((*batch_size, 5, 5)),
@@ -264,11 +265,13 @@ class RGBFullObsTransform(ObservationTransform):
         player_tiles = td['player_tiles']
         walls = td['wall_tiles']
         rewards = td['reward_tiles']
+        terminal = td['terminal_tiles']
 
         grid = TensorDict({'image': torch.zeros(*walls.shape, 3, dtype=torch.uint8)}, batch_size=td.batch_size)
         grid['image'][walls == 1] = light_gray
         grid['image'][rewards > 0] = green
         grid['image'][rewards < 0] = red
+        grid['image'][terminal == 1] = blue
         grid['image'][player_tiles == 1] = yellow
         grid['image'] = grid['image'].permute(0, 3, 1, 2)
         td['observation'] = grid['image'].squeeze(0)
@@ -321,7 +324,7 @@ if __name__ == '__main__':
 
     for i, data in enumerate(collector):
 
-        # data = env.rollout(max_steps=100, policy=env.rand_action, break_when_any_done=False)
+        # data = env.rollout(max_steps=100, policy=env.rand_action, break_when_any_terminal=False)
         buffer += [data.cpu()]
         print([data['next', 'reward']])
         print([data['episode_reward'].max().item()])
@@ -333,9 +336,9 @@ if __name__ == '__main__':
         {(S, A), next: {R_next, S_next, A_next}}
         
         [
-          { state_t0, reward_t0, done_t0, action_t0 next: { state_t2, reward_t2:1.0, done_t2:False } },
-          { state_t1, reward_t1, done_t1, action_t1 next: { state_t3, reward_t2:-1.0, done_t3:True } }  
-          { state_t0, reward_t0, done_t0, action_t0 next: { state_t3, reward_t2:1.0, done_t3:False } }
+          { state_t0, reward_t0, terminal_t0, action_t0 next: { state_t2, reward_t2:1.0, terminal_t2:False } },
+          { state_t1, reward_t1, terminal_t1, action_t1 next: { state_t3, reward_t2:-1.0, terminal_t3:True } }  
+          { state_t0, reward_t0, terminal_t0, action_t0 next: { state_t3, reward_t2:1.0, terminal_t3:False } }
         ]
     
         But which R to use, R or next: R?
@@ -346,14 +349,14 @@ if __name__ == '__main__':
         
         reward = data['next']['reward'][timestep]
         
-        Which done to use?
+        Which terminal to use?
         
         Recall that the value of a state is the expectation of future reward.
         Thus the terminal state has no value, therefore...
         
-        Q(S, A) = R_next + Q(S_next, A_next) * done_next
+        Q(S, A) = R_next + Q(S_next, A_next) * terminal_next
         
-        done =  data['next']['done'][timestep]
+        terminal =  data['next']['terminal'][timestep]
         """
 
     observation = torch.concatenate([b['observation'] for b in buffer], dim=1)
