@@ -277,14 +277,29 @@ class RGBFullObsTransform(ObservationTransform):
         )
 
 
-def wandb_wrap(args):
-    import wandb
-    with wandb.init(project=args.wandb_project, config=args):
-        args = wandb.config
-        main(args)
+if __name__ == '__main__':
 
+    """
+    Test the gridworlg using Proximal Policy Optimization (Actor - Critic)
+    """
 
-def main(args):
+    from argparse import ArgumentParser
+
+    parser = ArgumentParser()
+    parser.add_argument('--device', default='cpu')
+    parser.add_argument('--env_batch_size', type=int, default=16)
+    parser.add_argument('--steps_per_batch', type=int, default=32)
+    parser.add_argument('--train_steps', type=int, default=1000)
+    parser.add_argument('--clip_epsilon', type=float, default=0.1)
+    parser.add_argument('--gamma', type=float, default=0.95)
+    parser.add_argument('--lmbda', type=float, default=0.9)
+    parser.add_argument('--entropy_eps', type=float, default=0.001)
+    parser.add_argument('--max_grad_norm', type=float, default=2.0)
+    parser.add_argument('--hidden_dim', type=int, default=64)
+    parser.add_argument('--lr', type=float, default=1e-3)
+    parser.add_argument('--demo', action='store_true')
+    args = parser.parse_args()
+
     import tqdm
     import torch
     from collections import defaultdict
@@ -309,6 +324,8 @@ def main(args):
     from matplotlib import pyplot as plt
     import matplotlib.animation as animation
     from torchvision.utils import make_grid
+
+    wandb.init(project='supergrid')
 
     frames_per_batch = args.env_batch_size * args.steps_per_batch
     total_frames = args.env_batch_size * args.steps_per_batch * args.train_steps
@@ -337,6 +354,7 @@ def main(args):
     in_features = env.observation_spec['flat_obs'].shape[-1]
     actions_n = env.action_spec.n
 
+
     # value function to compute advantage
     class Value(nn.Module):
         def __init__(self, in_features, hidden_dim):
@@ -351,10 +369,12 @@ def main(args):
             values = self.net(obs)
             return values
 
+
     value_module = ValueOperator(
         module=Value(in_features=in_features, hidden_dim=args.hidden_dim),
         in_keys=['flat_obs']
     ).to(args.device)
+
 
     # policy network
     class Policy(nn.Module):
@@ -368,6 +388,7 @@ def main(args):
 
         def forward(self, obs):
             return log_softmax(self.net(obs), dim=-1)
+
 
     policy_net = Policy(in_features, args.hidden_dim, actions_n)
 
@@ -435,6 +456,7 @@ def main(args):
         optim.step()
         optim.zero_grad()
 
+
         def retrieve_episode_stats(tensordict_data, prefix=None):
             prefix = '' if prefix is None else f"{prefix}_"
             episode_reward = tensordict_data["next", "episode_reward"]
@@ -449,6 +471,7 @@ def main(args):
                 f"{prefix}state_value_mean": state_value.mean().item(),
                 f"{prefix}state_value_min": state_value.min().item()
             }
+
 
         epi_stats = retrieve_episode_stats(tensordict_data, 'train')
         if i % 100:
@@ -489,73 +512,57 @@ def main(args):
         pbar.set_description(", ".join([eval_str, cum_reward_str, stepcount_str, lr_str]))
         scheduler.step()
 
-    with set_exploration_type(ExplorationType.RANDOM), torch.no_grad():
-        eval_rollout = env.rollout(1000, policy_module, break_when_any_done=False)
+    if args.demo:
+        with set_exploration_type(ExplorationType.RANDOM), torch.no_grad():
+            eval_rollout = env.rollout(1000, policy_module, break_when_any_done=False)
 
-        """
-        The data dict layout is transitions
+            """
+            The data dict layout is transitions
 
-        {(S, A), next: {R_next, S_next, A_next}}
+            {(S, A), next: {R_next, S_next, A_next}}
 
-        [
-          { state_t0, reward_t0, terminal_t0, action_t0 next: { state_t2, reward_t2:1.0, terminal_t2:False } },
-          { state_t1, reward_t1, terminal_t1, action_t1 next: { state_t3, reward_t2:-1.0, terminal_t3:True } }  
-          { state_t0, reward_t0, terminal_t0, action_t0 next: { state_t3, reward_t2:1.0, terminal_t3:False } }
-        ]
+            [
+              { state_t0, reward_t0, terminal_t0, action_t0 next: { state_t2, reward_t2:1.0, terminal_t2:False } },
+              { state_t1, reward_t1, terminal_t1, action_t1 next: { state_t3, reward_t2:-1.0, terminal_t3:True } }  
+              { state_t0, reward_t0, terminal_t0, action_t0 next: { state_t3, reward_t2:1.0, terminal_t3:False } }
+            ]
 
-        But which R to use, R or next: R?
+            But which R to use, R or next: R?
 
-        recall: Q(S, A) = R + Q(S_next, A_next)
+            recall: Q(S, A) = R + Q(S_next, A_next)
 
-        Observe that reward_t0 is always zero, reward is a consequence for taking an action in a state, therefore...
+            Observe that reward_t0 is always zero, reward is a consequence for taking an action in a state, therefore...
 
-        reward = data['next']['reward'][timestep]
+            reward = data['next']['reward'][timestep]
 
-        Which terminal to use?
+            Which terminal to use?
 
-        Recall that the value of a state is the expectation of future reward.
-        Thus the terminal state has no value, therefore...
+            Recall that the value of a state is the expectation of future reward.
+            Thus the terminal state has no value, therefore...
 
-        Q(S, A) = R_next + Q(S_next, A_next) * terminal_next
+            Q(S, A) = R_next + Q(S_next, A_next) * terminal_next
 
-        terminal =  data['next']['terminal'][timestep]
-        """
+            terminal =  data['next']['terminal'][timestep]
+            """
 
-        eval_rollout = eval_rollout.cpu()
-        observation = eval_rollout['image']
-        walls = eval_rollout['wall_tiles']
+            eval_rollout = eval_rollout.cpu()
+            observation = eval_rollout['image']
+            walls = eval_rollout['wall_tiles']
 
-        fig, ax = plt.subplots(1)
-        img_plt = ax.imshow(make_grid(observation[:, 0]).permute(1, 2, 0))
-
-        def animate(i):
-            global text_plt
-            x = make_grid(observation[:, i]).permute(1, 2, 0)
-            img_plt.set_data(x)
-            return
-
-        myAnimation = animation.FuncAnimation(fig, animate, frames=90, interval=500, blit=False, repeat=True)
-
-        # uncomment if you want to save the output to mp4
-        # FFwriter = animation.FFMpegWriter(fps=1)
-        # myAnimation.save('animation.mp4', writer=FFwriter)
-        plt.show()
+            fig, ax = plt.subplots(1)
+            img_plt = ax.imshow(make_grid(observation[:, 0]).permute(1, 2, 0))
 
 
-if __name__ == '__main__':
-    from argparse import ArgumentParser
+            def animate(i):
+                global text_plt
+                x = make_grid(observation[:, i]).permute(1, 2, 0)
+                img_plt.set_data(x)
+                return
 
-    parser = ArgumentParser()
-    parser.add_argument('--device', default='cpu')
-    parser.add_argument('--env_batch_size', type=int, default=32)
-    parser.add_argument('--steps_per_batch', type=int, default=16)
-    parser.add_argument('--train_steps', type=int, default=10000)
-    parser.add_argument('--clip_epsilon', type=float, default=0.2)
-    parser.add_argument('--gamma', type=float, default=0.99)
-    parser.add_argument('--lmbda', type=float, default=0.95)
-    parser.add_argument('--entropy_eps', type=float, default=0.01)
-    parser.add_argument('--max_grad_norm', type=float, default=1.0)
-    parser.add_argument('--hidden_dim', type=int, default=128)
-    parser.add_argument('--lr', type=float, default=1e-4)
-    args = parser.parse_args()
-    main(args)
+
+            myAnimation = animation.FuncAnimation(fig, animate, frames=90, interval=500, blit=False, repeat=True)
+
+            # uncomment if you want to save the output to mp4
+            # FFwriter = animation.FFMpegWriter(fps=1)
+            # myAnimation.save('animation.mp4', writer=FFwriter)
+            plt.show()
