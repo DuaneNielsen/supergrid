@@ -45,6 +45,7 @@ action_vec = torch.stack(
     ]
 )
 
+# colors for RGB image
 yellow = tensor([255, 255, 0], dtype=torch.uint8)
 red = tensor([255, 0, 0], dtype=torch.uint8)
 green = tensor([0, 255, 0], dtype=torch.uint8)
@@ -580,9 +581,10 @@ if __name__ == '__main__':
                 return
 
 
-            myAnimation = animation.FuncAnimation(fig, animate, frames=90, interval=500, blit=False, repeat=True)
+            myAnimation = animation.FuncAnimation(fig, animate, frames=90, interval=500, blit=False, repeat=False)
 
             # uncomment if you want to save the output to mp4
-            # FFwriter = animation.FFMpegWriter(fps=1)
+            # you will need ffmpeg in your path, or in the directory where you run the script
+            # FFwriter = animation.FFMpegWriter(fps=2)
             # myAnimation.save('animation.mp4', writer=FFwriter)
             plt.show()
