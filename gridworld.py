@@ -126,6 +126,25 @@ def _reset(self, tensordict=None):
 
 
 def gen_params(batch_size=None):
+    """
+
+    To change the layout of the gridworld, change these parameters
+
+    walls: 1 indicates the position of a wall.  The boundary grid cells must have a wall.
+    rewards: The amount of reward for entering the tile.
+        Rewards are only received the first time the agent enters the tile
+    terminal_states: Indicated by 1, when this tile is entered, the terminated flag is set true
+
+    :param batch_size: the number of environments to run simultaneously
+    :return: a batch_size tensordict, with the following entries
+
+       "player_pos": N, 2 tensor indices that correspond to the players location
+       "player_tiles": N, 5, 5 tensor, with a single tile set to 1 that indicates player position
+       "wall_tiles": N, 5, 5 tensor, 1 indicates wall
+       "reward_tiles": N, 5, 5 tensor, rewards remaining in environment
+       "terminal_tiles": N, 5, 5 tensor, episode will terminate when tile with value True is entered
+
+    """
     walls = tensor([
         [1, 1, 1, 1, 1],
         [1, 0, 0, 0, 1],
@@ -280,7 +299,7 @@ class RGBFullObsTransform(ObservationTransform):
 if __name__ == '__main__':
 
     """
-    Test the gridworlg using Proximal Policy Optimization (Actor - Critic)
+    Test the gridworld using Proximal Policy Optimization (Actor - Critic)
     """
 
     from argparse import ArgumentParser
