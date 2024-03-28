@@ -1,14 +1,13 @@
 import torch
 from torch import tensor
 from tensordict import TensorDict
-from torchrl.data import CompositeSpec, BoundedTensorSpec, UnboundedContinuousTensorSpec, UnboundedDiscreteTensorSpec, \
+from torchrl.data import CompositeSpec, BoundedTensorSpec, UnboundedDiscreteTensorSpec, \
     DiscreteTensorSpec, \
     UnboundedContinuousTensorSpec
 from torchrl.envs import (
     EnvBase,
 )
-from torchrl.envs.transforms.transforms import _apply_to_composite, ObservationTransform, Resize
-from tensordict.utils import NestedKey
+from torchrl.envs.transforms.transforms import _apply_to_composite, ObservationTransform
 from typing import Any, Dict, List, Optional, OrderedDict, Sequence, Tuple, Union
 from enum import IntEnum
 
