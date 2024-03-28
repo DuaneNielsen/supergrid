@@ -75,7 +75,7 @@ wandb: View sweep at: https://wandb.ai/duanenielsen/supergrid/sweeps/t1qjy41y
 wandb: Run sweep agent with: wandb agent duanenielsen/supergrid/t1qjy41y
 ```
 
-run generated agent comment
+run generated agent command
 ```commandline
 wandb agent duanenielsen/supergrid/t1qjy41y
 ```
