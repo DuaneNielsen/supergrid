@@ -250,22 +250,17 @@ class Gridworld(EnvBase):
 
 
 class RGBFullObsTransform(ObservationTransform):
+    """
+    Converts the state to a N, 3, H, W uint8 image tensor
+    Adds it to the tensordict under the key [image]
+    """
 
-    def __init__(
-            self,
-            w: int,
-            h: int | None = None,
-            in_keys: Sequence[NestedKey] | None = None,
-            out_keys: Sequence[NestedKey] | None = None,
-    ):
-        super().__init__(in_keys, out_keys)
-        self.w = w
-        self.h = h if h is not None else w
+    def __init__(self):
+        super().__init__(in_keys=['wall_tiles'], out_keys=['image'])
 
     def forward(self, tensordict):
         return self._call(tensordict)
 
-    # The transform must also modify the data at reset time
     def _reset(self, tensordict, tensordict_reset):
         return self._call(tensordict_reset)
 
@@ -287,10 +282,11 @@ class RGBFullObsTransform(ObservationTransform):
 
     @_apply_to_composite
     def transform_observation_spec(self, observation_spec):
+        N, H, W = observation_spec.shape
         return BoundedTensorSpec(
             minimum=0,
             maximum=255,
-            shape=torch.Size((*self.parent.batch_size, 3, self.w, self.h)),
+            shape=torch.Size((N, 3, H, W)),
             dtype=torch.uint8,
             device=observation_spec.device
         )
@@ -299,24 +295,27 @@ class RGBFullObsTransform(ObservationTransform):
 if __name__ == '__main__':
 
     """
-    Test the gridworld using Proximal Policy Optimization (Actor - Critic)
+    Optimize the agent using Proximal Policy Optimization (Actor - Critic)
+    the Generalized Advantage Estimation module is used to compute Advantage
     """
 
     from argparse import ArgumentParser
 
     parser = ArgumentParser()
-    parser.add_argument('--device', default='cpu')
-    parser.add_argument('--env_batch_size', type=int, default=16)
-    parser.add_argument('--steps_per_batch', type=int, default=32)
-    parser.add_argument('--train_steps', type=int, default=1000)
-    parser.add_argument('--clip_epsilon', type=float, default=0.1)
-    parser.add_argument('--gamma', type=float, default=0.95)
-    parser.add_argument('--lmbda', type=float, default=0.9)
-    parser.add_argument('--entropy_eps', type=float, default=0.001)
-    parser.add_argument('--max_grad_norm', type=float, default=2.0)
-    parser.add_argument('--hidden_dim', type=int, default=64)
-    parser.add_argument('--lr', type=float, default=1e-3)
-    parser.add_argument('--demo', action='store_true')
+    parser.add_argument('--device', default='cpu', help="cuda or cpu")
+    parser.add_argument('--env_batch_size', type=int, default=16, help="number of environments")
+    parser.add_argument('--steps_per_batch', type=int, default=32, help="number of steps to take in env per batch")
+    parser.add_argument('--train_steps', type=int, default=1000, help="number of PPO updates to run")
+    parser.add_argument('--clip_epsilon', type=float, default=0.1, help="PPO clipping parameter")
+    parser.add_argument('--gamma', type=float, default=0.95, help="GAE gamma parameter")
+    parser.add_argument('--lmbda', type=float, default=0.9, help="GAE lambda parameter")
+    parser.add_argument('--entropy_eps', type=float, default=0.001, help="policy entropy bonus weight")
+    parser.add_argument('--max_grad_norm', type=float, default=2.0, help="gradient clipping")
+    parser.add_argument('--hidden_dim', type=int, default=64, help="hidden dim size of MLP")
+    parser.add_argument('--lr', type=float, default=1e-3, help="Adam learning rate")
+    parser.add_argument('--eval_freq', type=int, default=256, help="run eval after this many training steps")
+    parser.add_argument('--demo', action='store_true', help="command switch to visualize after training completes")
+    parser.add_argument('--wandb', action='store_true', help='command switch to enable wandb logging')
     args = parser.parse_args()
 
     import tqdm
@@ -339,12 +338,14 @@ if __name__ == '__main__':
         FlattenObservation,
         CatTensors
     )
-    import wandb
+
     from matplotlib import pyplot as plt
     import matplotlib.animation as animation
     from torchvision.utils import make_grid
 
-    wandb.init(project='supergrid')
+    if args.wandb:
+        import wandb
+        wandb.init(project='supergrid')
 
     frames_per_batch = args.env_batch_size * args.steps_per_batch
     total_frames = args.env_batch_size * args.steps_per_batch * args.train_steps
@@ -367,7 +368,7 @@ if __name__ == '__main__':
     )
     env.append_transform(StepCounter())
     env.append_transform(RewardSum(reset_keys=['_reset']))
-    env.append_transform(RGBFullObsTransform(5, in_keys=['wall_tiles'], out_keys=['image']))
+    env.append_transform(RGBFullObsTransform())
     check_env_specs(env)
 
     in_features = env.observation_spec['flat_obs'].shape[-1]
@@ -493,7 +494,7 @@ if __name__ == '__main__':
 
 
         epi_stats = retrieve_episode_stats(tensordict_data, 'train')
-        if i % 100:
+        if i % 100 and args.wandb:
             wandb.log(epi_stats, step=i)
 
         logs["reward"].append(tensordict_data["next", "reward"].mean().item())
@@ -510,12 +511,13 @@ if __name__ == '__main__':
         logs["lr"].append(optim.param_groups[0]["lr"])
         lr_str = f"lr policy: {logs['lr'][-1]: 4.4f}"
 
-        if i % 1024 == 0:
+        if i % args.eval_freq == 0:
             with set_exploration_type(ExplorationType.RANDOM), torch.no_grad():
                 eval_rollout = env.rollout(1000, policy_module)
                 advantage_module(eval_rollout)
                 epi_stats = retrieve_episode_stats(eval_rollout, prefix='eval')
-                wandb.log(epi_stats, step=i)
+                if args.wandb:
+                    wandb.log(epi_stats, step=i)
 
                 logs["eval reward"].append(eval_rollout["next", "reward"].mean().item())
                 logs["eval reward (sum)"].append(
