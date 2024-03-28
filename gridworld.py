@@ -1,22 +1,14 @@
-from typing import Optional
-
 import torch
 from torch import tensor
 from tensordict import TensorDict
-from torchrl.data import CompositeSpec, BoundedTensorSpec, UnboundedContinuousTensorSpec, UnboundedDiscreteTensorSpec, DiscreteTensorSpec, \
+from torchrl.data import CompositeSpec, BoundedTensorSpec, UnboundedContinuousTensorSpec, UnboundedDiscreteTensorSpec, \
+    DiscreteTensorSpec, \
     UnboundedContinuousTensorSpec
 from torchrl.envs import (
     EnvBase,
-    Transform,
-    TransformedEnv,
-    RewardSum,
 )
-from torchrl.envs.utils import check_env_specs, step_mdp
 from torchrl.envs.transforms.transforms import _apply_to_composite, ObservationTransform, Resize
-from torch.nn.functional import interpolate
-from torchvision.utils import make_grid
-from math import prod
-from tensordict.utils import expand_as_right, expand_right, NestedKey
+from tensordict.utils import NestedKey
 from typing import Any, Dict, List, Optional, OrderedDict, Sequence, Tuple, Union
 from enum import IntEnum
 
@@ -26,16 +18,14 @@ Action space: (0, 1, 2, 3) -> N, E, S, W
 
 Features
 
-walls
-1 time pickup rewards or penalties
-terminated tiles
-outputs a fully observable RGB image 
+  walls
+  1 time pickup rewards or penalties
+  terminated tiles
+  outputs a fully observable RGB image 
 
 look at the gen_params function to setup the world
 
-example of configuring and performing a rollout at bottom
-
-Maybe I will write an even simpler stateless non-vectorized version of this gridworld
+PPO training code and visualization provided
 """
 
 
@@ -47,13 +37,14 @@ class Actions(IntEnum):
 
 
 # N/S is reversed as y-axis in images is reversed
-action_vec = [
-    tensor([-1, 0]),  # N
-    tensor([0, 1]),  # E
-    tensor([1, 0]),  # S
-    tensor([0, -1])  # W
-]
-action_vec = torch.stack(action_vec)
+action_vec = torch.stack(
+    [
+        tensor([-1, 0]),  # N
+        tensor([0, 1]),  # E
+        tensor([1, 0]),  # S
+        tensor([0, -1])  # W
+    ]
+)
 
 yellow = tensor([255, 255, 0], dtype=torch.uint8)
 red = tensor([255, 0, 0], dtype=torch.uint8)
@@ -89,7 +80,6 @@ def pos_to_grid(pos, H, W, device='cpu', dtype=torch.float32):
 
 
 def _step(state):
-
     device = state.device
     N, H, W = state['wall_tiles'].shape
     batch_range = torch.arange(N, device=device)
@@ -146,7 +136,7 @@ def gen_params(batch_size=None):
 
     rewards = tensor([
         [0, 0, 0, 0, 0],
-        [0, 1, 1, 0, 0],
+        [0, 1, 1, 1, 0],
         [0, 1, 0, 1, 0],
         [0, -1, 1, 1, 0],
         [0, 0, 0, 0, 0],
@@ -165,11 +155,11 @@ def gen_params(batch_size=None):
     player_tiles = pos_to_grid(player_pos, H, W, dtype=walls.dtype)
 
     state = {
-            "player_pos": player_pos,
-            "player_tiles": player_tiles,
-            "wall_tiles": walls,
-            "reward_tiles": rewards,
-            "terminal_tiles": terminal_states
+        "player_pos": player_pos,
+        "player_tiles": player_tiles,
+        "wall_tiles": walls,
+        "reward_tiles": rewards,
+        "terminal_tiles": terminal_states
     }
 
     td = TensorDict(state, batch_size=[])
@@ -261,7 +251,6 @@ class RGBFullObsTransform(ObservationTransform):
         return self._call(tensordict_reset)
 
     def _call(self, td):
-
         player_tiles = td['player_tiles']
         walls = td['wall_tiles']
         rewards = td['reward_tiles']
@@ -290,84 +279,283 @@ class RGBFullObsTransform(ObservationTransform):
 
 if __name__ == '__main__':
 
+    import tqdm
+    import torch
+    from collections import defaultdict
+    import torch.nn as nn
+    from torch.optim import Adam
+    from tensordict.nn import TensorDictModule
+    from torch.distributions import Categorical
+    from torch.nn.functional import log_softmax
+    from torchrl.modules import ProbabilisticActor, ValueOperator
+    from torchrl.collectors import SyncDataCollector
+    from torchrl.objectives import ClipPPOLoss
+    from torchrl.objectives.value import GAE
+    from torchrl.envs.utils import check_env_specs, ExplorationType, set_exploration_type
+    from torchrl.envs import (
+        StepCounter,
+        RewardSum,
+        TransformedEnv,
+        FlattenObservation,
+        CatTensors
+    )
+    import wandb
     from matplotlib import pyplot as plt
     import matplotlib.animation as animation
-    from torchrl.collectors import SyncDataCollector
+    from torchvision.utils import make_grid
+    from argparse import ArgumentParser
 
-    env_batch_size = 64
+    parser = ArgumentParser()
+    parser.add_argument('--device', default='cpu')
+    parser.add_argument('--env_batch_size', type=int, default=32)
+    parser.add_argument('--steps_per_batch', type=int, default=16)
+    parser.add_argument('--train_steps', type=int, default=10000)
+    parser.add_argument('--clip_epsilon', type=float, default=0.2)
+    parser.add_argument('--gamma', type=float, default=0.99)
+    parser.add_argument('--lmbda', type=float, default=0.95)
+    parser.add_argument('--entropy_eps', type=float, default=0.01)
+    parser.add_argument('--max_grad_norm', type=float, default=1.0)
+    parser.add_argument('--hidden_dim', type=int, default=128)
+    parser.add_argument('--lr', type=float, default=1e-4)
+    args = parser.parse_args()
 
-    env = Gridworld(batch_size=torch.Size([env_batch_size]), device='cuda')
+    wandb.init(project='grid_ppo_test')
+
+    frames_per_batch = args.env_batch_size * args.steps_per_batch
+    total_frames = args.env_batch_size * args.steps_per_batch * args.train_steps
+
+    env = Gridworld(batch_size=torch.Size([args.env_batch_size]), device=args.device)
+    env = TransformedEnv(
+        env
+    )
+    env.append_transform(
+        FlattenObservation(-2, -1,
+                           in_keys=["player_tiles", "wall_tiles", "reward_tiles"],
+                           out_keys=["flat_player_tiles", "flat_wall_tiles", "flat_reward_tiles"]
+                           )
+    )
+    env.append_transform(
+        CatTensors(
+            in_keys=["flat_player_tiles", "flat_wall_tiles", "flat_reward_tiles"],
+            out_key='flat_obs'
+        )
+    )
+    env.append_transform(StepCounter())
+    env.append_transform(RewardSum(reset_keys=['_reset']))
+    env.append_transform(RGBFullObsTransform(5, in_keys=['wall_tiles'], out_keys=['image']))
     check_env_specs(env)
 
-    env = TransformedEnv(
-        env,
-        RGBFullObsTransform(5, in_keys=['wall_tiles', 'player_tiles', 'reward_tiles', 'terminal_tiles'], out_keys=['image']),
+    in_features = env.observation_spec['flat_obs'].shape[-1]
+    actions_n = env.action_spec.n
+
+
+    # value function to compute advantage
+    class Value(nn.Module):
+        def __init__(self, in_features, hidden_dim):
+            super().__init__()
+            self.net = nn.Sequential(
+                nn.Linear(in_features=in_features, out_features=hidden_dim),
+                nn.ReLU(),
+                nn.Linear(in_features=hidden_dim, out_features=1, bias=False)
+            )
+
+        def forward(self, obs):
+            values = self.net(obs)
+            return values
+
+
+    value_module = ValueOperator(
+        module=Value(in_features=in_features, hidden_dim=args.hidden_dim),
+        in_keys=['flat_obs']
+    ).to(args.device)
+
+
+    # policy network
+    class Policy(nn.Module):
+        def __init__(self, in_features, hidden_dim, actions_n):
+            super().__init__()
+            self.net = nn.Sequential(
+                nn.Linear(in_features=in_features, out_features=hidden_dim),
+                nn.ReLU(),
+                nn.Linear(in_features=hidden_dim, out_features=actions_n, bias=False)
+            )
+
+        def forward(self, obs):
+            return log_softmax(self.net(obs), dim=-1)
+
+
+    policy_net = Policy(in_features, args.hidden_dim, actions_n)
+
+    policy_module = TensorDictModule(
+        policy_net,
+        in_keys=["flat_obs"],
+        out_keys=["logits"],
     )
 
-    check_env_specs(env)
+    policy_module = ProbabilisticActor(
+        policy_module,
+        in_keys=['logits'],
+        out_keys=['action'],
+        distribution_class=Categorical,
+        return_log_prob=True
+    ).to(args.device)
 
-    env.append_transform(RewardSum())
-
-    # env.append_transform(Resize(64, 64, in_keys=['observation'], out_keys=['observation'], interpolation='nearest'))
-    # check_env_specs(env)
+    # no need to reuse data for PPO as it's an online algo
+    # so we will go with datacollector only and collect fresh batches each time
 
     collector = SyncDataCollector(
         env,
-        env.rand_action,
-        frames_per_batch=env_batch_size * 1,
-        total_frames=env_batch_size * 100,
+        policy_module,
+        frames_per_batch=frames_per_batch,
+        total_frames=total_frames,
         split_trajs=False,
-        device="cuda",
+        device=args.device,
     )
 
-    buffer = []
+    advantage_module = GAE(
+        gamma=args.gamma, lmbda=args.lmbda, value_network=value_module, average_gae=True
+    )
 
-    for i, data in enumerate(collector):
+    loss_module = ClipPPOLoss(
+        actor_network=policy_module,
+        critic_network=value_module,
+        clip_epsilon=args.clip_epsilon,
+        entropy_bonus=bool(args.entropy_eps),
+        entropy_coef=args.entropy_eps,
+        critic_coef=1.0,
+        loss_critic_type="smooth_l1"
+    )
 
-        # data = env.rollout(max_steps=100, policy=env.rand_action, break_when_any_terminal=False)
-        buffer += [data.cpu()]
+    optim = Adam(loss_module.parameters(), lr=args.lr)
+    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
+        optim, total_frames // frames_per_batch, 0.0
+    )
+
+    logs = defaultdict(list)
+    pbar = tqdm.tqdm(total=total_frames)
+    eval_str = ""
+
+    for i, tensordict_data in enumerate(collector):
+
+        advantage_module(tensordict_data)
+        loss_vals = loss_module(tensordict_data)
+        loss_value = (
+                loss_vals["loss_objective"]
+                + loss_vals["loss_critic"]
+                + loss_vals["loss_entropy"]
+        )
+
+        loss_value.backward()
+        torch.nn.utils.clip_grad_norm_(loss_module.parameters(), args.max_grad_norm)
+        optim.step()
+        optim.zero_grad()
+
+
+        def retrieve_episode_stats(tensordict_data, prefix=None):
+            prefix = '' if prefix is None else f"{prefix}_"
+            episode_reward = tensordict_data["next", "episode_reward"]
+            step_count = tensordict_data["step_count"]
+            state_value = tensordict_data['state_value']
+
+            return {
+                f"{prefix}episode_reward_mean": episode_reward.mean().item(),
+                f"{prefix}episode_reward_max": episode_reward.max().item(),
+                f"{prefix}step_count_max": step_count.max().item(),
+                f"{prefix}state_value_max": state_value.max().item(),
+                f"{prefix}state_value_mean": state_value.mean().item(),
+                f"{prefix}state_value_min": state_value.min().item()
+            }
+
+
+        epi_stats = retrieve_episode_stats(tensordict_data, 'train')
+        if i % 100:
+            wandb.log(epi_stats, step=i)
+
+        logs["reward"].append(tensordict_data["next", "reward"].mean().item())
+        logs["episode_reward"].append(epi_stats['train_episode_reward_mean'])
+        pbar.update(tensordict_data.numel())
+
+        cum_reward_str = (
+            f"average reward={logs['reward'][-1]: 4.4f} (init={logs['reward'][0]: 4.4f})"
+        )
+
+        logs["step_count"].append(epi_stats['train_step_count_max'])
+
+        stepcount_str = f"step count (max): {logs['step_count'][-1]}"
+        logs["lr"].append(optim.param_groups[0]["lr"])
+        lr_str = f"lr policy: {logs['lr'][-1]: 4.4f}"
+
+        if i % 1024 == 0:
+            with set_exploration_type(ExplorationType.RANDOM), torch.no_grad():
+                eval_rollout = env.rollout(1000, policy_module)
+                advantage_module(eval_rollout)
+                epi_stats = retrieve_episode_stats(eval_rollout, prefix='eval')
+                wandb.log(epi_stats, step=i)
+
+                logs["eval reward"].append(eval_rollout["next", "reward"].mean().item())
+                logs["eval reward (sum)"].append(
+                    eval_rollout["next", "reward"].sum().item()
+                )
+                logs["eval step_count"].append(eval_rollout["step_count"].max().item())
+                eval_str = (
+                    f"eval cumulative reward: {logs['eval reward (sum)'][-1]: 4.4f} "
+                    f"(init: {logs['eval reward (sum)'][0]: 4.4f}), "
+                    f"eval step-count: {logs['eval step_count'][-1]}"
+                )
+                del eval_rollout
+        pbar.set_description(", ".join([eval_str, cum_reward_str, stepcount_str, lr_str]))
+        scheduler.step()
+
+    with set_exploration_type(ExplorationType.RANDOM), torch.no_grad():
+        eval_rollout = env.rollout(1000, policy_module, break_when_any_done=False)
 
         """
         The data dict layout is transitions
-        
+
         {(S, A), next: {R_next, S_next, A_next}}
-        
+
         [
           { state_t0, reward_t0, terminal_t0, action_t0 next: { state_t2, reward_t2:1.0, terminal_t2:False } },
           { state_t1, reward_t1, terminal_t1, action_t1 next: { state_t3, reward_t2:-1.0, terminal_t3:True } }  
           { state_t0, reward_t0, terminal_t0, action_t0 next: { state_t3, reward_t2:1.0, terminal_t3:False } }
         ]
-    
+
         But which R to use, R or next: R?
-        
+
         recall: Q(S, A) = R + Q(S_next, A_next)
-        
+
         Observe that reward_t0 is always zero, reward is a consequence for taking an action in a state, therefore...
-        
+
         reward = data['next']['reward'][timestep]
-        
+
         Which terminal to use?
-        
+
         Recall that the value of a state is the expectation of future reward.
         Thus the terminal state has no value, therefore...
-        
+
         Q(S, A) = R_next + Q(S_next, A_next) * terminal_next
-        
+
         terminal =  data['next']['terminal'][timestep]
         """
 
-    observation = torch.concatenate([b['image'] for b in buffer], dim=1)
+        eval_rollout = eval_rollout.cpu()
+        observation = eval_rollout['image']
+        walls = eval_rollout['wall_tiles']
 
-    fig, ax = plt.subplots(1)
-    img_plt = ax.imshow(make_grid(observation[:, 0]).permute(1, 2, 0))
+        fig, ax = plt.subplots(1)
+        img_plt = ax.imshow(make_grid(observation[:, 0]).permute(1, 2, 0))
 
-    def animate(i):
-        x = make_grid(observation[:, i]).permute(1, 2, 0)
-        img_plt.set_data(x)
-        return
 
-    myAnimation = animation.FuncAnimation(fig, animate, frames=90, interval=500, blit=False, repeat=False)
+        def animate(i):
+            global text_plt
+            x = make_grid(observation[:, i]).permute(1, 2, 0)
+            img_plt.set_data(x)
+            return
 
-    # FFwriter = animation.FFMpegWriter(fps=1)
-    # myAnimation.save('animation.mp4', writer=FFwriter)
-    plt.show()
+
+        myAnimation = animation.FuncAnimation(fig, animate, frames=90, interval=500, blit=False, repeat=True)
+
+        # uncomment if you want to save the output to mp4
+        # FFwriter = animation.FFMpegWriter(fps=1)
+        # myAnimation.save('animation.mp4', writer=FFwriter)
+        plt.show()
