@@ -2,7 +2,7 @@
 
 A minimal, vectorized and stateless gridword implemented in pytorchRL
 
-![Demo Video](animation.mp4)
+https://github.com/DuaneNielsen/supergrid/assets/11070508/98b7e1ad-6f90-4403-b727-e6d9c3d861d4
 
 Action space: (0, 1, 2, 3) -> N, E, S, W
 
