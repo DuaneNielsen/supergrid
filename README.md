@@ -20,9 +20,7 @@ The purpose of this repo is to provide a minimal example to learn from
 
 ### Installing
 
-Tested under python 3.11
-
-Required for the demo
+Tested under python 3.11 venv
 
 clone the directory using git
 
