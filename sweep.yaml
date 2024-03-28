@@ -2,6 +2,7 @@ command:
   - ${env}
   - .\venv\Scripts\python.exe
   - ${program}
+  - --wandb
   - ${args}
 
 program: gridworld.py

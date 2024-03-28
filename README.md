@@ -33,13 +33,17 @@ git clone https://github.com/duanenielsen/supergrid
 requirements
 
 ```commandline
-torch
-torchrl
-tensordict
-torchvision
-matplotlib
+pip install torch
+pip install torchrl
+pip install torchvision
+pip install matplotlib
+pip install tqdm
 ```
 
+optional requirements
+```commandline
+pip install wandb
+```
 
 ### Running
 
@@ -61,7 +65,19 @@ python gridworld.py --demo --wandb
 run a parameter sweep using wandb
 ```commandline
 wandb sweep sweep.yaml
-wandb agent 
+```
+
+you will see output like below..
+```commandline
+wandb: Creating sweep from: sweep.yaml
+wandb: Creating sweep with ID: t1qjy41y
+wandb: View sweep at: https://wandb.ai/duanenielsen/supergrid/sweeps/t1qjy41y
+wandb: Run sweep agent with: wandb agent duanenielsen/supergrid/t1qjy41y
+```
+
+run generated agent comment
+```commandline
+wandb agent duanenielsen/supergrid/t1qjy41y
 ```
 
 ### changing the world
