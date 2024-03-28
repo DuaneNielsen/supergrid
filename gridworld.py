@@ -277,8 +277,14 @@ class RGBFullObsTransform(ObservationTransform):
         )
 
 
-if __name__ == '__main__':
+def wandb_wrap(args):
+    import wandb
+    with wandb.init(project=args.wandb_project, config=args):
+        args = wandb.config
+        main(args)
 
+
+def main(args):
     import tqdm
     import torch
     from collections import defaultdict
@@ -303,23 +309,6 @@ if __name__ == '__main__':
     from matplotlib import pyplot as plt
     import matplotlib.animation as animation
     from torchvision.utils import make_grid
-    from argparse import ArgumentParser
-
-    parser = ArgumentParser()
-    parser.add_argument('--device', default='cpu')
-    parser.add_argument('--env_batch_size', type=int, default=32)
-    parser.add_argument('--steps_per_batch', type=int, default=16)
-    parser.add_argument('--train_steps', type=int, default=10000)
-    parser.add_argument('--clip_epsilon', type=float, default=0.2)
-    parser.add_argument('--gamma', type=float, default=0.99)
-    parser.add_argument('--lmbda', type=float, default=0.95)
-    parser.add_argument('--entropy_eps', type=float, default=0.01)
-    parser.add_argument('--max_grad_norm', type=float, default=1.0)
-    parser.add_argument('--hidden_dim', type=int, default=128)
-    parser.add_argument('--lr', type=float, default=1e-4)
-    args = parser.parse_args()
-
-    wandb.init(project='grid_ppo_test')
 
     frames_per_batch = args.env_batch_size * args.steps_per_batch
     total_frames = args.env_batch_size * args.steps_per_batch * args.train_steps
@@ -348,7 +337,6 @@ if __name__ == '__main__':
     in_features = env.observation_spec['flat_obs'].shape[-1]
     actions_n = env.action_spec.n
 
-
     # value function to compute advantage
     class Value(nn.Module):
         def __init__(self, in_features, hidden_dim):
@@ -363,12 +351,10 @@ if __name__ == '__main__':
             values = self.net(obs)
             return values
 
-
     value_module = ValueOperator(
         module=Value(in_features=in_features, hidden_dim=args.hidden_dim),
         in_keys=['flat_obs']
     ).to(args.device)
-
 
     # policy network
     class Policy(nn.Module):
@@ -382,7 +368,6 @@ if __name__ == '__main__':
 
         def forward(self, obs):
             return log_softmax(self.net(obs), dim=-1)
-
 
     policy_net = Policy(in_features, args.hidden_dim, actions_n)
 
@@ -450,7 +435,6 @@ if __name__ == '__main__':
         optim.step()
         optim.zero_grad()
 
-
         def retrieve_episode_stats(tensordict_data, prefix=None):
             prefix = '' if prefix is None else f"{prefix}_"
             episode_reward = tensordict_data["next", "episode_reward"]
@@ -465,7 +449,6 @@ if __name__ == '__main__':
                 f"{prefix}state_value_mean": state_value.mean().item(),
                 f"{prefix}state_value_min": state_value.min().item()
             }
-
 
         epi_stats = retrieve_episode_stats(tensordict_data, 'train')
         if i % 100:
@@ -545,13 +528,11 @@ if __name__ == '__main__':
         fig, ax = plt.subplots(1)
         img_plt = ax.imshow(make_grid(observation[:, 0]).permute(1, 2, 0))
 
-
         def animate(i):
             global text_plt
             x = make_grid(observation[:, i]).permute(1, 2, 0)
             img_plt.set_data(x)
             return
-
 
         myAnimation = animation.FuncAnimation(fig, animate, frames=90, interval=500, blit=False, repeat=True)
 
@@ -559,3 +540,22 @@ if __name__ == '__main__':
         # FFwriter = animation.FFMpegWriter(fps=1)
         # myAnimation.save('animation.mp4', writer=FFwriter)
         plt.show()
+
+
+if __name__ == '__main__':
+    from argparse import ArgumentParser
+
+    parser = ArgumentParser()
+    parser.add_argument('--device', default='cpu')
+    parser.add_argument('--env_batch_size', type=int, default=32)
+    parser.add_argument('--steps_per_batch', type=int, default=16)
+    parser.add_argument('--train_steps', type=int, default=10000)
+    parser.add_argument('--clip_epsilon', type=float, default=0.2)
+    parser.add_argument('--gamma', type=float, default=0.99)
+    parser.add_argument('--lmbda', type=float, default=0.95)
+    parser.add_argument('--entropy_eps', type=float, default=0.01)
+    parser.add_argument('--max_grad_norm', type=float, default=1.0)
+    parser.add_argument('--hidden_dim', type=int, default=128)
+    parser.add_argument('--lr', type=float, default=1e-4)
+    args = parser.parse_args()
+    main(args)
