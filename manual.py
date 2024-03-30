@@ -40,7 +40,5 @@ fig, ax = plt.subplots()
 fig.canvas.mpl_connect('key_press_event', on_press)
 observation = td['image']
 img_plt = ax.imshow(make_grid(observation[0]).permute(1, 2, 0))
-
-xl = ax.set_xlabel('easy come, easy go')
-ax.set_title('Press a key')
+ax.set_title('SUPERGRIDWORLD')
 plt.show()

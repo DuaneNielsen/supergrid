@@ -36,6 +36,7 @@ pip install torchrl
 pip install torchvision
 pip install matplotlib
 pip install tqdm
+pip install av
 ```
 
 optional requirements

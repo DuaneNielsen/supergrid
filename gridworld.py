@@ -269,14 +269,15 @@ class RGBFullObsTransform(ObservationTransform):
         walls = td['wall_tiles']
         rewards = td['reward_tiles']
         terminal = td['terminal_tiles']
+        device = walls.device
 
         shape = *walls.shape, 3
-        td['image'] = torch.zeros(shape, dtype=torch.uint8, device=td.device)
-        td['image'][walls == 1] = light_gray.to(td.device)
-        td['image'][rewards > 0] = green.to(td.device)
-        td['image'][rewards < 0] = red.to(td.device)
-        td['image'][terminal == 1] = blue.to(td.device)
-        td['image'][player_tiles == 1] = yellow.to(td.device)
+        td['image'] = torch.zeros(shape, dtype=torch.uint8, device=device)
+        td['image'][walls == 1] = light_gray.to(device)
+        td['image'][rewards > 0] = green.to(device)
+        td['image'][rewards < 0] = red.to(device)
+        td['image'][terminal == 1] = blue.to(device)
+        td['image'][player_tiles == 1] = yellow.to(device)
         td['image'] = td['image'].permute(0, 3, 1, 2).squeeze(0)
         return td
 
