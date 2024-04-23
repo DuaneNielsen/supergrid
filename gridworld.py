@@ -88,6 +88,8 @@ def _step(state):
     # move player position checking for collisions
     direction = action_vec.to(device)
     next_player_pos = state['player_pos'] + direction[action]
+    next_player_pos[:, 0] = next_player_pos[:, 0] % H
+    next_player_pos[:, 1] = next_player_pos[:, 1] % W
     next_player_grid = pos_to_grid(next_player_pos, H, W, device=device, dtype=torch.bool)
     collide_wall = torch.logical_and(next_player_grid, state['wall_tiles'] == 1).any(-1).any(-1)
     player_pos = torch.where(collide_wall[..., None], state['player_pos'], next_player_pos)
