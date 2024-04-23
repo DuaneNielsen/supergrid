@@ -6,13 +6,19 @@ from torchrl.data import CompositeSpec, BoundedTensorSpec, UnboundedDiscreteTens
     UnboundedContinuousTensorSpec
 from torchrl.envs import (
     EnvBase,
+    Resize,
+    ToTensorImage,
+    PermuteTransform,
+    StepCounter,
+    RewardSum,
+    TransformedEnv,
+    FlattenObservation,
+    CatTensors
 )
 from torchrl.envs.transforms.transforms import _apply_to_composite, ObservationTransform
 from typing import Any, Dict, List, Optional, OrderedDict, Sequence, Tuple, Union
 from enum import IntEnum
-import matplotlib
-
-matplotlib.use('QtAgg')
+from torchrl.record import VideoRecorder
 
 """
 A minimal stateless vectorized gridworld in pytorch rl
@@ -258,7 +264,7 @@ class RGBFullObsTransform(ObservationTransform):
     """
 
     def __init__(self):
-        super().__init__(in_keys=['wall_tiles'], out_keys=['image'])
+        super().__init__(in_keys=['wall_tiles'], out_keys=['pixels'])
 
     def forward(self, tensordict):
         return self._call(tensordict)
@@ -274,13 +280,13 @@ class RGBFullObsTransform(ObservationTransform):
         device = walls.device
 
         shape = *walls.shape, 3
-        td['image'] = torch.zeros(shape, dtype=torch.uint8, device=device)
-        td['image'][walls == 1] = light_gray.to(device)
-        td['image'][rewards > 0] = green.to(device)
-        td['image'][rewards < 0] = red.to(device)
-        td['image'][terminal == 1] = blue.to(device)
-        td['image'][player_tiles == 1] = yellow.to(device)
-        td['image'] = td['image'].permute(0, 3, 1, 2).squeeze(0)
+        td['pixels'] = torch.zeros(shape, dtype=torch.uint8, device=device)
+        td['pixels'][walls == 1] = light_gray.to(device)
+        td['pixels'][rewards > 0] = green.to(device)
+        td['pixels'][rewards < 0] = red.to(device)
+        td['pixels'][terminal == 1] = blue.to(device)
+        td['pixels'][player_tiles == 1] = yellow.to(device)
+        td['pixels'] = td['pixels'].permute(0, 3, 1, 2).squeeze(0)
         return td
 
     @_apply_to_composite
@@ -335,18 +341,14 @@ if __name__ == '__main__':
     from torchrl.objectives import ClipPPOLoss
     from torchrl.objectives.value import GAE
     from torchrl.envs.utils import check_env_specs, ExplorationType, set_exploration_type
-    from torchrl.envs import (
-        StepCounter,
-        RewardSum,
-        TransformedEnv,
-        FlattenObservation,
-        CatTensors
-    )
     from torchrl.record.loggers import CSVLogger
     from hrid import HRID
 
     from matplotlib import pyplot as plt
+    import matplotlib
     import matplotlib.animation as animation
+
+    matplotlib.use('QtAgg')
     from torchvision.utils import make_grid
 
     exp_name = HRID().generate()
@@ -487,6 +489,7 @@ if __name__ == '__main__':
         train_reward_mean, train_reward_max, train_reward_n = (
             log_episode_stats(tensordict_data, "episode_reward", "train", i))
         log_episode_stats(tensordict_data, "step_count", "train", i)
+        pbar.update(tensordict_data.numel())
 
         advantage_module(tensordict_data)
         loss_vals = loss_module(tensordict_data)
@@ -497,68 +500,77 @@ if __name__ == '__main__':
         optim.zero_grad()
 
         logger.log_scalar('lr', scheduler.get_last_lr()[0])
-        pbar.update(tensordict_data.numel())
+
 
         if train_reward_mean is not None and eval_reward_mean is not None:
             pbar.set_description(
                 f'train reward mean/max (n) {train_reward_mean:.2f}/{train_reward_max:.2f} ({train_reward_n}) '
                 f'eval reward mean/max (n): {eval_reward_mean:.2f}/{eval_reward_max:.2f} ({eval_reward_n})')
-            pbar.update(tensordict_data.numel())
 
         if i % args.eval_freq == 0:
-            with ((set_exploration_type(ExplorationType.RANDOM), torch.no_grad())):
+            with set_exploration_type(ExplorationType.RANDOM), torch.no_grad():
                 eval_rollout = env.rollout(1000, policy_module, break_when_any_done=False)
                 advantage_module(eval_rollout)
                 eval_reward_mean, eval_reward_max, eval_reward_n = \
-                    log_episode_stats(tensordict_data, "episode_reward", "train", i)
-                log_episode_stats(tensordict_data, "step_count", "train", i)
+                    log_episode_stats(tensordict_data, "episode_reward", "eval", i)
+                log_episode_stats(tensordict_data, "step_count", "eval", i)
 
         scheduler.step()
 
     if args.demo:
         with set_exploration_type(ExplorationType.RANDOM), torch.no_grad():
+            pbar.set_description('rolling out video')
+            N, H, W = env.observation_spec['wall_tiles'].shape
+            env.append_transform(
+                Resize(H * 8, W * 8, in_keys=['pixels'], out_keys=['pixels'], interpolation='nearest'))
+            env.append_transform(PermuteTransform([-2, -1, -3], in_keys=['pixels'], out_keys=['pixels']))
+            recorder = VideoRecorder(logger=logger, tag='gridworld', fps=3, skip=1)
+            env.append_transform(recorder)
             eval_rollout = env.rollout(1000, policy_module, break_when_any_done=False)
+            pbar.set_description(f'writing video to {exp_name}')
+            recorder.dump()
+            pbar.close()
 
             """
             The data dict layout is transitions
-
+    
             {(S, A), next: {R_next, S_next, A_next}}
-
+    
             [
               { state_t0, reward_t0, terminal_t0, action_t0 next: { state_t2, reward_t2:1.0, terminal_t2:False } },
               { state_t1, reward_t1, terminal_t1, action_t1 next: { state_t3, reward_t2:-1.0, terminal_t3:True } }  
               { state_t0, reward_t0, terminal_t0, action_t0 next: { state_t3, reward_t2:1.0, terminal_t3:False } }
             ]
-
+    
             But which R to use, R or next: R?
-
+    
             recall: Q(S, A) = R + Q(S_next, A_next)
-
+    
             Observe that reward_t0 is always zero, reward is a consequence for taking an action in a state, therefore...
-
+    
             reward = data['next']['reward'][timestep]
-
+    
             Which terminal to use?
-
+    
             Recall that the value of a state is the expectation of future reward.
             Thus the terminal state has no value, therefore...
-
+    
             Q(S, A) = R_next + Q(S_next, A_next) * terminal_next
-
+    
             terminal =  data['next']['terminal'][timestep]
             """
 
             eval_rollout = eval_rollout.cpu()
-            observation = eval_rollout['image']
+            observation = eval_rollout['pixels']
             walls = eval_rollout['wall_tiles']
 
             fig, ax = plt.subplots(1)
-            img_plt = ax.imshow(make_grid(observation[:, 0]).permute(1, 2, 0))
+            img_plt = ax.imshow(make_grid(observation[:, 0].permute(0, 3, 1, 2)).permute(1, 2, 0))
 
 
             def animate(i):
                 global text_plt
-                x = make_grid(observation[:, i]).permute(1, 2, 0)
+                x = make_grid(observation[:, i].permute(0, 3, 1, 2)).permute(1, 2, 0)
                 img_plt.set_data(x)
                 return
 
