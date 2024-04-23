@@ -10,6 +10,9 @@ from torchrl.envs import (
 from torchrl.envs.transforms.transforms import _apply_to_composite, ObservationTransform
 from typing import Any, Dict, List, Optional, OrderedDict, Sequence, Tuple, Union
 from enum import IntEnum
+import matplotlib
+
+matplotlib.use('QtAgg')
 
 """
 A minimal stateless vectorized gridworld in pytorch rl
@@ -189,39 +192,38 @@ def gen_params(batch_size=None):
 
 
 def _make_spec(self, td_params):
-    batch_size = td_params.shape
     self.observation_spec = CompositeSpec(
         player_tiles=BoundedTensorSpec(
             minimum=0,
             maximum=1,
-            shape=torch.Size((*batch_size, 5, 5)),
-            dtype=torch.float32,
+            shape=torch.Size(td_params['player_tiles'].shape),
+            dtype=td_params['player_tiles'].dtype,
         ),
         wall_tiles=BoundedTensorSpec(
             minimum=0,
             maximum=1,
-            shape=torch.Size((*batch_size, 5, 5)),
-            dtype=torch.float32,
+            shape=torch.Size(td_params['wall_tiles'].shape),
+            dtype=td_params['wall_tiles'].dtype,
         ),
         reward_tiles=UnboundedContinuousTensorSpec(
-            shape=torch.Size((*batch_size, 5, 5)),
-            dtype=torch.float32,
+            shape=torch.Size(td_params['reward_tiles'].shape),
+            dtype=td_params['reward_tiles'].dtype,
         ),
         terminal_tiles=BoundedTensorSpec(
             minimum=0,
             maximum=1,
-            shape=torch.Size((*batch_size, 5, 5)),
-            dtype=torch.bool,
+            shape=torch.Size(td_params['terminal_tiles'].shape),
+            dtype=td_params['terminal_tiles'].dtype,
         ),
         player_pos=UnboundedDiscreteTensorSpec(
-            shape=torch.Size((*batch_size, 2,)),
-            dtype=torch.int64
+            shape=torch.Size(td_params['player_pos'].shape),
+            dtype=td_params['player_pos'].dtype
         ),
-        shape=torch.Size((*batch_size,))
+        shape=torch.Size(td_params.shape)
     )
     self.state_spec = self.observation_spec.clone()
-    self.action_spec = DiscreteTensorSpec(4, shape=torch.Size((*batch_size, 1)))
-    self.reward_spec = UnboundedContinuousTensorSpec(shape=torch.Size((*batch_size, 1)))
+    self.action_spec = DiscreteTensorSpec(4, shape=torch.Size((*td_params.shape, 1)))
+    self.reward_spec = UnboundedContinuousTensorSpec(shape=torch.Size((*td_params.shape, 1)))
 
 
 def _set_seed(self, seed: Optional[int]):
@@ -319,9 +321,10 @@ if __name__ == '__main__':
     parser.add_argument('--wandb', action='store_true', help='command switch to enable wandb logging')
     args = parser.parse_args()
 
+    from collections import defaultdict
+    from statistics import mean
     import tqdm
     import torch
-    from collections import defaultdict
     import torch.nn as nn
     from torch.optim import Adam
     from tensordict.nn import TensorDictModule
@@ -339,14 +342,15 @@ if __name__ == '__main__':
         FlattenObservation,
         CatTensors
     )
+    from torchrl.record.loggers import CSVLogger
+    from hrid import HRID
 
     from matplotlib import pyplot as plt
     import matplotlib.animation as animation
     from torchvision.utils import make_grid
 
-    if args.wandb:
-        import wandb
-        wandb.init(project='supergrid')
+    exp_name = HRID().generate()
+    logger = CSVLogger(exp_name, 'csv', video_format='mp4', video_fps=3)
 
     frames_per_batch = args.env_batch_size * args.steps_per_batch
     total_frames = args.env_batch_size * args.steps_per_batch * args.train_steps
@@ -458,80 +462,57 @@ if __name__ == '__main__':
         optim, total_frames // frames_per_batch, 0.0
     )
 
+
+    def log_episode_stats(tensordict_data, key, prefix, i):
+        terminal_values = tensordict_data['next', key][tensordict_data['next', 'done']].flatten().tolist()
+        value_mean, value_max, value_n = None, None, None
+        if len(terminal_values) > 0:
+            value_mean, value_max, value_n = mean(terminal_values), max(terminal_values), len(terminal_values)
+            logger.log_scalar(f"{prefix}_{key}_mean", value_mean, i)
+            logger.log_scalar(f"{prefix}_{key}_max", value_max, i)
+            logger.log_scalar(f"{prefix}_{key}_n", value_max, i)
+        return value_mean, value_max, value_n
+
+
+    # training loop starts here
+
     logs = defaultdict(list)
     pbar = tqdm.tqdm(total=total_frames)
     eval_str = ""
+    train_reward_mean, train_reward_max, train_reward_n, = 0., 0., 0
+    eval_reward_mean, eval_reward_max, eval_reward_n = 0., 0., 0
 
     for i, tensordict_data in enumerate(collector):
 
+        train_reward_mean, train_reward_max, train_reward_n = (
+            log_episode_stats(tensordict_data, "episode_reward", "train", i))
+        log_episode_stats(tensordict_data, "step_count", "train", i)
+
         advantage_module(tensordict_data)
         loss_vals = loss_module(tensordict_data)
-        loss_value = (
-                loss_vals["loss_objective"]
-                + loss_vals["loss_critic"]
-                + loss_vals["loss_entropy"]
-        )
-
+        loss_value = (loss_vals["loss_objective"] + loss_vals["loss_critic"] + loss_vals["loss_entropy"])
         loss_value.backward()
         torch.nn.utils.clip_grad_norm_(loss_module.parameters(), args.max_grad_norm)
         optim.step()
         optim.zero_grad()
 
-
-        def retrieve_episode_stats(tensordict_data, prefix=None):
-            prefix = '' if prefix is None else f"{prefix}_"
-            episode_reward = tensordict_data["next", "episode_reward"]
-            step_count = tensordict_data["step_count"]
-            state_value = tensordict_data['state_value']
-
-            return {
-                f"{prefix}episode_reward_mean": episode_reward.mean().item(),
-                f"{prefix}episode_reward_max": episode_reward.max().item(),
-                f"{prefix}step_count_max": step_count.max().item(),
-                f"{prefix}state_value_max": state_value.max().item(),
-                f"{prefix}state_value_mean": state_value.mean().item(),
-                f"{prefix}state_value_min": state_value.min().item()
-            }
-
-
-        epi_stats = retrieve_episode_stats(tensordict_data, 'train')
-        if i % 100 and args.wandb:
-            wandb.log(epi_stats, step=i)
-
-        logs["reward"].append(tensordict_data["next", "reward"].mean().item())
-        logs["episode_reward"].append(epi_stats['train_episode_reward_mean'])
+        logger.log_scalar('lr', scheduler.get_last_lr()[0])
         pbar.update(tensordict_data.numel())
 
-        cum_reward_str = (
-            f"average reward={logs['reward'][-1]: 4.4f} (init={logs['reward'][0]: 4.4f})"
-        )
-
-        logs["step_count"].append(epi_stats['train_step_count_max'])
-
-        stepcount_str = f"step count (max): {logs['step_count'][-1]}"
-        logs["lr"].append(optim.param_groups[0]["lr"])
-        lr_str = f"lr policy: {logs['lr'][-1]: 4.4f}"
+        if train_reward_mean is not None and eval_reward_mean is not None:
+            pbar.set_description(
+                f'train reward mean/max (n) {train_reward_mean:.2f}/{train_reward_max:.2f} ({train_reward_n}) '
+                f'eval reward mean/max (n): {eval_reward_mean:.2f}/{eval_reward_max:.2f} ({eval_reward_n})')
+            pbar.update(tensordict_data.numel())
 
         if i % args.eval_freq == 0:
-            with set_exploration_type(ExplorationType.RANDOM), torch.no_grad():
-                eval_rollout = env.rollout(1000, policy_module)
+            with ((set_exploration_type(ExplorationType.RANDOM), torch.no_grad())):
+                eval_rollout = env.rollout(1000, policy_module, break_when_any_done=False)
                 advantage_module(eval_rollout)
-                epi_stats = retrieve_episode_stats(eval_rollout, prefix='eval')
-                if args.wandb:
-                    wandb.log(epi_stats, step=i)
+                eval_reward_mean, eval_reward_max, eval_reward_n = \
+                    log_episode_stats(tensordict_data, "episode_reward", "train", i)
+                log_episode_stats(tensordict_data, "step_count", "train", i)
 
-                logs["eval reward"].append(eval_rollout["next", "reward"].mean().item())
-                logs["eval reward (sum)"].append(
-                    eval_rollout["next", "reward"].sum().item()
-                )
-                logs["eval step_count"].append(eval_rollout["step_count"].max().item())
-                eval_str = (
-                    f"eval cumulative reward: {logs['eval reward (sum)'][-1]: 4.4f} "
-                    f"(init: {logs['eval reward (sum)'][0]: 4.4f}), "
-                    f"eval step-count: {logs['eval step_count'][-1]}"
-                )
-                del eval_rollout
-        pbar.set_description(", ".join([eval_str, cum_reward_str, stepcount_str, lr_str]))
         scheduler.step()
 
     if args.demo:
