@@ -4,21 +4,11 @@ from tensordict import TensorDict
 from torchrl.data import CompositeSpec, BoundedTensorSpec, UnboundedDiscreteTensorSpec, \
     DiscreteTensorSpec, \
     UnboundedContinuousTensorSpec
-from torchrl.envs import (
-    EnvBase,
-    Resize,
-    ToTensorImage,
-    PermuteTransform,
-    StepCounter,
-    RewardSum,
-    TransformedEnv,
-    FlattenObservation,
-    CatTensors
-)
+from torchrl.envs import EnvBase
 from torchrl.envs.transforms.transforms import _apply_to_composite, ObservationTransform
 from typing import Any, Dict, List, Optional, OrderedDict, Sequence, Tuple, Union
 from enum import IntEnum
-from torchrl.record import VideoRecorder
+
 
 """
 A minimal stateless vectorized gridworld in pytorch rl
@@ -347,6 +337,17 @@ if __name__ == '__main__':
     from matplotlib import pyplot as plt
     import matplotlib
     import matplotlib.animation as animation
+    from torchrl.envs import (
+        Resize,
+        ToTensorImage,
+        PermuteTransform,
+        StepCounter,
+        RewardSum,
+        TransformedEnv,
+        FlattenObservation,
+        CatTensors
+    )
+    from torchrl.record import VideoRecorder
 
     matplotlib.use('QtAgg')
     from torchvision.utils import make_grid
