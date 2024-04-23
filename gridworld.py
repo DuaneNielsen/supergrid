@@ -566,19 +566,12 @@ if __name__ == '__main__':
 
             fig, ax = plt.subplots(1)
             img_plt = ax.imshow(make_grid(observation[:, 0].permute(0, 3, 1, 2)).permute(1, 2, 0))
-
+            plt.title(f"supergrid {exp_name}")
 
             def animate(i):
-                global text_plt
                 x = make_grid(observation[:, i].permute(0, 3, 1, 2)).permute(1, 2, 0)
                 img_plt.set_data(x)
                 return
 
-
             myAnimation = animation.FuncAnimation(fig, animate, frames=90, interval=500, blit=False, repeat=False)
-
-            # uncomment if you want to save the output to mp4
-            # you will need ffmpeg in your path, or in the directory where you run the script
-            # FFwriter = animation.FFMpegWriter(fps=2)
-            # myAnimation.save('animation.mp4', writer=FFwriter)
             plt.show()
