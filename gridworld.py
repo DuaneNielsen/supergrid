@@ -6,8 +6,9 @@ from torchrl.data import CompositeSpec, BoundedTensorSpec, UnboundedDiscreteTens
     UnboundedContinuousTensorSpec
 from torchrl.envs import EnvBase
 from torchrl.envs.transforms.transforms import _apply_to_composite, ObservationTransform
-from typing import Any, Dict, List, Optional, OrderedDict, Sequence, Tuple, Union
+from typing import Any, Dict, List, Optional, OrderedDict, Sequence, Tuple, Union, Iterable
 from enum import IntEnum
+
 
 """
 A minimal stateless vectorized gridworld in pytorch rl
@@ -183,8 +184,7 @@ def gen_params(batch_size=None):
 
     td = TensorDict(state, batch_size=[])
 
-    if batch_size:
-        td = td.expand(batch_size).contiguous()
+    td = td.expand(torch.Size(batch_size)).contiguous()
     return td
 
 
@@ -236,6 +236,18 @@ class Gridworld(EnvBase):
     batch_locked = False
 
     def __init__(self, td_params=None, device="cpu", batch_size=None):
+
+        if batch_size is None:
+            batch_size = torch.Size([1])
+        elif isinstance(batch_size, int):
+            batch_size = torch.Size([batch_size])
+        elif isinstance(batch_size, Iterable):
+            batch_size = torch.Size(batch_size)
+        elif isinstance(batch_size, torch.Size):
+            pass
+        else:
+            assert False, "batch size must be torch.Size, list[int], or int"
+
         if td_params is None:
             td_params = self.gen_params(batch_size)
         super().__init__(device=device, batch_size=batch_size)

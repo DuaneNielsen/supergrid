@@ -4,6 +4,12 @@ from torch import tensor
 from torchrl.envs import step_mdp
 
 
+def test_batch_size_one():
+    env = Gridworld(batch_size=1, device='cpu')
+    state = env.rollout(10)
+    assert state.batch_size[0] == 1
+
+
 def test_movement_and_walls():
     env = Gridworld(batch_size=torch.Size([4]), device='cpu')
     state = env.reset()
