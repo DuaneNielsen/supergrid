@@ -290,7 +290,7 @@ class RGBFullObsTransform(ObservationTransform):
         td['pixels'][rewards < 0] = red.to(device)
         td['pixels'][terminal == 1] = blue.to(device)
         td['pixels'][player_tiles == 1] = yellow.to(device)
-        td['pixels'] = td['pixels'].permute(0, 3, 1, 2).squeeze(0)
+        td['pixels'] = td['pixels'].permute(0, 3, 1, 2)
         return td
 
     @_apply_to_composite

@@ -87,6 +87,82 @@ def gen_maze(batch_size=None):
 class MazeWorld(Gridworld):
     gen_params = staticmethod(gen_maze)
 
+
+def gen_flower(batch_size=None):
+    """
+
+    To change the layout of the gridworld, change these parameters
+
+    walls: 1 indicates the position of a wall.  The boundary grid cells must have a wall.
+    rewards: The amount of reward for entering the tile.
+        Rewards are only received the first time the agent enters the tile
+    terminal_states: Indicated by 1, when this tile is entered, the terminated flag is set true
+
+    :param batch_size: the number of environments to run simultaneously
+    :return: a batch_size tensordict, with the following entries
+
+       "player_pos": N, 2 tensor indices that correspond to the players location
+       "player_tiles": N, H, W a single tile set to 1 that indicates player position
+       "wall_tiles": 1 indicates wall
+       "reward_tiles":  rewards remaining in environment
+       "terminal_tiles":  episode will terminate when tile with value True is entered
+
+    """
+    walls = tensor([
+        [0, 0, 0, 0, 0, 0, 0],
+        [0, 0, 0, 0, 0, 0, 0],
+        [0, 0, 0, 0, 0, 0, 0],
+        [0, 0, 0, 0, 0, 0, 0],
+        [0, 0, 0, 0, 0, 0, 0],
+        [0, 0, 0, 0, 0, 0, 0],
+        [0, 0, 0, 0, 0, 0, 0],
+    ], dtype=torch.float32)
+
+    rewards = tensor([
+        [0, 0, 0, 0, 0, 0, 0],
+        [0, 0, 0, 1, 0, 0, 0],
+        [0, 0, 1, 1, 1, 0, 0],
+        [0, 1, 1, 0, 1, 1, 0],
+        [0, 0, 1, 1, 1, 0, 0],
+        [0, 0, 0, 1, 0, 0, 0],
+        [0, 0, 0, 0, 0, 0, 0],
+    ], dtype=torch.float32)
+
+    terminal_states = tensor([
+        [0, 0, 0, 1, 0, 0, 0],
+        [0, 0, 1, 0, 1, 0, 0],
+        [0, 1, 0, 0, 0, 1, 0],
+        [1, 0, 0, 0, 0, 0, 1],
+        [0, 1, 0, 0, 0, 1, 0],
+        [0, 0, 1, 0, 1, 0, 0],
+        [0, 0, 0, 1, 0, 0, 0],
+    ], dtype=torch.bool)
+
+    H, W = walls.shape
+    player_pos = tensor([3, 3], dtype=torch.int64)
+    player_tiles = pos_to_grid(player_pos, H, W, dtype=walls.dtype)
+
+    state = {
+        "player_pos": player_pos,
+        "player_tiles": player_tiles,
+        "wall_tiles": walls,
+        "reward_tiles": rewards,
+        "terminal_tiles": terminal_states
+    }
+
+    td = TensorDict(state, batch_size=[])
+
+    if batch_size:
+        td = td.expand(batch_size).contiguous()
+    return td
+
+
+class FlowerWorld(Gridworld):
+    gen_params = staticmethod(gen_flower)
+
+
+
+
 if __name__ == '__main__':
 
     """
